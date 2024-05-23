@@ -1,0 +1,1754 @@
+
+```{r}
+library(tidyverse)
+library(microViz)
+library(microeco)
+library(phyloseq)
+library(ggpubr)
+library(patchwork)
+library(robustbase)
+library(vegan)
+library(readxl)
+library(grid)
+
+# define theme that fits the presentation background
+theme_fop <-  theme(panel.background = element_rect(fill = "#f1f1f1"), 
+              panel.border = element_rect(fill = "transparent", color = "gray50",
+                                          linewidth = 0.7),
+              plot.background = element_rect(fill = "#f1f1f1"),
+              legend.background = element_rect(fill = "#f1f1f1", size = 0.4, 
+                                               colour = "gray50"),
+              legend.text = element_text(color = "gray29"),
+              legend.title = element_text(color = "gray29"),
+              axis.title = element_text(color = "gray29", size = 12),
+              axis.ticks  = element_line(color = "gray29"),
+              axis.text =  element_text(color = "gray29", size = 12))
+
+# define palette for the three sampling sites 
+pal_cit <- c("Styria" = "gray", 
+             "Vienna" = "darkorchid3",
+             "Berlin" = "darkgoldenrod3" )
+
+```
+
+# Data clean up
+```{r}
+
+## BERLIN ####
+dir_folder_berlin <- 'C:/Users/Angela Cukusic/Documents/Biology/PhD/Berlin/Angela_analysis/cleaning_data'
+
+# asv_table (16S rDNA marker gene count data)
+asv_table_berlin <- read.table(file.path(dir_folder_berlin, "asv_table_final.txt"),
+                        check.names = FALSE, 
+                        row.names=1, 
+                        header=TRUE, 
+                        sep="") 
+
+
+# tax_table (taxonomy of each OTU)
+tax_table_berlin <- read.delim(file.path(dir_folder_berlin, "tax_table_final.txt"), 
+                        header=TRUE, 
+                        sep="")
+
+
+# metadata
+metadata_berlin <- read.table(file.path(dir_folder_berlin, "env_data_final.csv"), 
+                              row.names=1, 
+                              header=TRUE, 
+                              sep=",") %>% 
+                    column_to_rownames("well_id") %>% 
+                    rename("Endtiefe" = "Endteufe") %>% 
+                    # this the only dataset with po4 in mg not ug
+                    mutate(PO4_mg_L = PO4_mg_L*1000)
+
+
+
+
+## VIENNA #####
+dir_folder_vienna <- '~/Biology/PhD/Vienna/data/clean_data'
+
+
+
+# asv_table (16S rDNA marker gene count data)
+asv_table_vienna <- read.csv(file.path(dir_folder_vienna, "asv_table_final.csv"),
+                        check.names = FALSE, 
+                        row.names=1, 
+                        header=TRUE, 
+                        sep=",") 
+
+
+# tax_table (taxonomy of each OTU)
+tax_table_vienna <- read.csv(file.path(dir_folder_vienna, "tax_no_cont.csv"), 
+                        header=TRUE,
+                        row.names=1,
+                        sep=",") %>% 
+                  rename("Domain" = "Kingdom")
+             
+
+
+# metadata
+metadata_vienna <- read.csv(file.path(dir_folder_vienna, "master_data.csv"), 
+                              header=TRUE, 
+                              sep=",") %>% 
+                    select(!c("X.1", "NH4" ) ) %>% 
+                    column_to_rownames("sample_season") %>% 
+                    filter(Type != "SW") %>% 
+                    # cells per mL seems to be the unit
+                    mutate(TCC = TCC * 1000)  
+
+# additional data from the other sheet
+metadata_vienna <- read.csv("~/Biology/PhD/comparison_of_cities/data/HBTC_Fauna_Both_merged_rows(2).csv") %>% 
+            select("Samp_ID", "Shannon_H", "Abundance",   "Sealing_Percent" , 
+                   "Kf_Permeability_Coefficient", "d18O_2", "dH2_2", "d_excess_2", 
+                   "redox_category", "surfacewater_influenced", 
+                   "Distance_Surfacewater_m", 
+                   "Distance_Surfacewater_Habitatcategory"  , "Geology", 
+                    "Zn_ugL",  "HCO3_mg_L",  "As_ugL",  "Cd_ugL",
+                   "Pb_ugL", "NH4_mg_L", "Hg_ugL",  "Mn_ugL", "Fe_mg_L", 
+                   "Al_ugL",  "Cr_ugL",  "Ni_ugL",  "Cu_ugL"    )  %>% 
+
+  left_join(metadata_vienna %>% rownames_to_column("samp_ID"), ., by = c("samp_ID" = "Samp_ID") )
+
+
+
+## STYRIA #####
+ps_styria <- readRDS("C:/Users/Angela Cukusic/Documents/Biology/PhD/comparison_of_cities/data/ps.steiermarkGWTable.rds")
+asv_table_styria <- ps_styria@otu_table %>% as.matrix() %>%  as.data.frame()
+tax_table_styria <- ps_styria@tax_table %>% as.matrix() %>%  as.data.frame()
+metadata_styria <- ps_styria@sam_data %>% as.matrix() %>%  as.data.frame()
+
+# additional data from alice
+metadata_styria <- read_excel("data/2024Murdaten_Alice(1).xlsx", 
+                                     sheet = "Sheet1") %>%  
+                              mutate(samp_ID = paste(SamplingName, Identifier, sep = "_")) %>% 
+                              select(!c("HabitatType", "sequencing.id",
+                                        "SamplingName", "Identifier"))   %>% 
+                              left_join(metadata_styria , . , 
+                                                 by = c("JMF.ID" = "samp_ID" )   )
+
+```
+
+
+
+## Connect them 
+```{r}
+
+meta_asv_table <- full_join(asv_table_berlin %>% rownames_to_column("asvs"), 
+                            asv_table_vienna %>% rownames_to_column("asvs"), by = "asvs") %>% 
+                  full_join(., asv_table_styria %>% rownames_to_column("asvs"), by = "asvs") %>% 
+                  replace(is.na(.), 0) %>% 
+                  column_to_rownames("asvs") 
+
+
+meta_tax_table <- rbind(tax_table_berlin, tax_table_vienna, tax_table_styria) %>% 
+                  rownames_to_column("ASVs") %>% 
+                  # it seems like all asvs are unique 
+                  distinct(., ASVs, .keep_all = TRUE) %>% 
+                  column_to_rownames("ASVs")
+
+
+# find variables present in all datasets and name them the same
+meta_env  <- plyr::rbind.fill ( # rbind.fill can connect columns only present in one df
+  
+  ## BERLIN
+metadata_berlin %>% rownames_to_column("samp_ID") %>% 
+  
+# rename to be the same  
+  rename("TCC" = "cells_per_L",  "int_ATP" = "atp_intra_pM",
+         "Temp" = "gw_temp_C", "pH" =  "pH_in_situ"   ,
+         "O2" = "oxygen", "Cond" = "EC_25C_uS_cm" ,
+         "Extraction_depth" = "FOK", "GW_Table" = "gw_table_m", 
+         "Mg" =  "Mg_mg_L" , "NO3" = "NO3_mg_L",
+         "PO4" = "PO4_mg_L", "SO4" = "SO4_mg_L" ,
+         "Cl" = "Cl_mg_L" ,  "Na" = "Na_mg_L",
+         "K" =  "K_mg_L",  "Ca" =   "Ca_mg_L" , 
+         "Zn" = "Zn_ug_L", "HCO3" = "HCO3_mg_L",
+         "As" = "As_ug_L", "Cd" = "Cd_ug_L", 
+         "Pb" = "Pb_ug_L", "NH4" =  "NH4_mg_L", 
+          "Hg" = "Hg_ug_L", "Mn" = "Mn_mg_L", 
+         "Fe" = "Fe_tot_mg_L", "Al" =  "Al_ug_L",
+         "Cr" = "Cr_ug_L", "Ni" = "Ni_ug_L", 
+         "Cu" = "Cu_ug_L" )  %>% 
+# seelect ones present in both urban sites  
+  select("samp_ID",  "NO3",  "PO4",
+          "SO4", "Cl", "Na", "K", "Ca", "Mg", "GW_Table", 
+          "Extraction_depth", "Temp", "Cond", "O2", 
+          "pH", "int_ATP", "TCC" , "geo_unit", 
+         "Zn" , "HCO3",  "As", "Cd" ,"Pb", "NH4", 
+          "Hg" , "Mn" , "Fe" , "Al" ,
+         "Cr" , "Ni", "Cu") %>%
+# add region factor  
+  mutate(Region = "Berlin")   ,
+
+                   
+
+  ## VIENNA
+metadata_vienna %>% rename("geo_unit" = "Geology", 
+                            "Zn" = "Zn_ugL", "HCO3" = "HCO3_mg_L",
+                            "As" = "As_ugL", "Cd" = "Cd_ugL",  
+                            "Pb" = "Pb_ugL", "NH4" =  "NH4_mg_L", 
+                            "Hg" = "Hg_ugL", "Mn" = "Mn_ugL", 
+                            "Fe" = "Fe_mg_L", "Al" =  "Al_ugL",
+                            "Cr" = "Cr_ugL", "Ni" = "Ni_ugL", 
+                            "Cu" = "Cu_ugL" , "dO18" = "d18O_2", 
+                           "dH2" = "dH2_2", "d.Excess" = "d_excess_2") %>% 
+  
+                     select("samp_ID",  "NO3",  "PO4", "DOC",
+                            "SO4", "Cl", "Na", "K", "Ca", "Mg", "GW_Table", 
+                            "Extraction_depth", "Temp", "Cond", "O2", 
+                            "pH", "int_ATP", "TCC" , "geo_unit", 
+                            "dO18", "dH2", "d.Excess", 
+                            "Zn" , "HCO3",  "As", "Cd" ,"Pb", "NH4",
+                            "Hg" , "Mn" , "Fe" , "Al" ,
+                            "Cr" , "Ni", "Cu", 
+                       # present only in Vienna     
+                            "Shannon_H", "Abundance",   "Sealing_Percent" , 
+                            "Kf_Permeability_Coefficient",
+                            "redox_category", 
+                            "surfacewater_influenced", 
+                            "Distance_Surfacewater_m", 
+                            "Distance_Surfacewater_Habitatcategory"  , 
+                            
+                            ) %>% 
+                      # add region factor
+                      mutate(Region = "Vienna") ,
+
+
+ 
+ ## STYRIA
+metadata_styria %>% rename("samp_ID" = "JMF.ID",  "Cond" = "EC", "GW_Table" = "GW_table",
+                           "int_ATP" = "intATP","Extraction_depth" =  "Ex_depth") %>% 
+                    select("samp_ID", "DOC",  "NO3",  "PO4",
+                            "SO4", "Cl", "Na", "K", "Ca", "Mg", "GW_Table", 
+                            "Extraction_depth", "Temp", "Cond", "O2", 
+                            "pH", "int_ATP", "TCC" , "dO18", "dH2", "d.Excess" ) %>% 
+                   mutate(Region = "Styria", geo_unit = "Styria") 
+
+
+) 
+
+
+# unique rownames based on sample ID
+rownames(meta_env) <-  meta_env$samp_ID
+# temperature categorisation for the temp analysis
+meta_env$temp_cat <- cut(as.numeric(meta_env$Temp), 
+                         breaks=c(0, 10, 12, 14, 16, 18, 20, 30), 
+                         labels=c('<10', '10-12', '12-14', '14-16', 
+                                    '16-18', '18-20', '20<'))
+
+```
+
+## Phyloseq creation
+```{r}
+
+# make phyloseq
+ps_meta <-   phyloseq(phyloseq::otu_table(as.matrix(meta_asv_table), taxa_are_rows=T),
+                      # remove the species information, the illumina seqs are too short
+                      phyloseq::tax_table(as.matrix(meta_tax_table[,-7]) ), 
+                      phyloseq::sample_data(meta_env)) 
+
+
+# remove the reference samples from Vienna (Marchfeld area)
+ps_meta %>%  ps_filter(!samp_ID %in%  c("22-246_fall", 
+                                       "EM10_spring",  
+                                       "EM62_spring", 
+                                       "22-52_fall",
+                                       "22-52_spring", 
+                                       "22.7/2_spring", 
+                                       "22.7/2_fall") ) %>% 
+# they are not numeric, do it cleaner later  
+# (there is no mutate_if/mutate_at with phyloseq?)
+  ps_mutate(Temp = as.numeric(Temp), 
+            NO3 = as.numeric(NO3), 
+            PO4 = as.numeric(PO4), 
+            SO4 = as.numeric(SO4), 
+            Cl = as.numeric(Cl), 
+            Na = as.numeric(Na), 
+            K = as.numeric(K), 
+            Ca = as.numeric(Ca), 
+            Mg = as.numeric(Mg), 
+            GW_Table = as.numeric(GW_Table), 
+            Extraction_depth = as.numeric(Extraction_depth), 
+            Cond = as.numeric(Cond), 
+            O2 = as.numeric(O2), 
+            pH = as.numeric(pH), 
+            int_ATP = as.numeric(int_ATP), 
+            TCC = as.numeric(TCC), 
+            geo_unit = as.factor(geo_unit), 
+            Region = as.factor(Region), 
+            temp_cat = as.factor(temp_cat) ) %>% 
+  
+# Berlin has below detection limit as negative, change it to 0  
+  ps_mutate(NO3 = ifelse(NO3 < 0, 0, NO3), 
+            PO4 =  ifelse(PO4 < 0, 0, PO4),
+            SO4 = ifelse(SO4 < 0, 0, SO4),
+            O2 = ifelse(O2 < 0, 0, O2),
+            # heavy metals
+            Cu = ifelse(Cu < 0, 0, Cu), 
+            Ni = ifelse(Ni < 0, 0, Ni), 
+            Cr = ifelse(Cr < 0, 0, Cr),
+            Al = ifelse(Al < 0, 0, Al),
+            Fe = ifelse(Fe < 0, 0, Fe),
+            Mn = ifelse(Mn < 0, 0, Mn),
+            Hg = ifelse(Hg < 0, 0, Hg), 
+            NH4 = ifelse(NH4 < 0, 0, NH4), 
+            Pb = ifelse(Pb < 0, 0, Pb),
+            Cd = ifelse(Cd < 0, 0, Cd),
+            As = ifelse(As < 0, 0, As), 
+            HCO3 = ifelse(HCO3 < 0, 0, HCO3),
+            Zn = ifelse(Zn < 0, 0, Zn)) -> ps_meta
+
+# save for future use  
+saveRDS(ps_meta, "C:/Users/Angela Cukusic/Documents/Biology/PhD/comparison_of_cities/data/ps_meta.rds")
+# readRDS("C:/Users/Angela Cukusic/Documents/Biology/PhD/comparison_of_cities/data/ps_meta.rds")
+
+
+
+# remove intermediate objects to save space
+rm(asv_table_berlin, asv_table_styria, asv_table_vienna, 
+   tax_table_berlin, tax_table_styria, tax_table_vienna)
+
+
+```
+
+
+
+
+## Filtering
+
+Remove chloroplast/mitoschodria genes since we are not sure they are bacterial in origin becuase of the endosymbiotic origin of these organelles - it is possible chloroplast is amplified because of its similarity to Rikettsiales. We also remove taxa which is unclassified on the Domain level, and those that belong to Eukarya:
+
+```{r filtering, results='hide'}
+# check for common problems with phyloseq objects
+phyloseq_validate(ps_meta) 
+
+
+# clean domain ####
+# only keep bacteria and archaea domain
+ps_meta<- ps_meta %>% subset_taxa(Domain %in% c("Bacteria", "Archaea"))
+
+
+# clean phylum ####
+# we do not want unclassified phylum either - it is too high level to be unclass. 
+ps_meta <- ps_meta %>% subset_taxa(Phylum != "")
+
+
+# clean order ####
+# clean chloroplast on order level
+ps_meta <- ps_meta %>% subset_taxa(Order != "Chloroplast")
+
+
+# final formatting of unclassified
+ps_meta %>% tax_fix(unknowns = c("", "uncultured"), 
+                    sep = " ", anon_unique = TRUE,
+                    suffix_rank = "classified") -> ps_meta
+
+# make sure after all the cleaning there are no rows wiith all zeroes
+prune_samples(sample_sums(ps_meta) > 0, ps_meta) -> ps_meta
+ps_meta
+
+
+# make also the microeco object for latere
+file2meco::phyloseq2meco(ps_meta) -> meco_meta 
+
+```
+
+
+## Inspect counts
+```{r}
+
+as.data.frame(sample_sums(ps_meta) ) %>% 
+  mutate(Region = as.data.frame(sample_data(ps_meta) )$Region ) %>% 
+  rename("sums" ="sample_sums(ps_meta)") %>% 
+  ggplot(aes(x = sums , fill = Region)) + 
+  geom_density(bins = 20, alpha = 0.8 ,  position = 'identity') + 
+  geom_vline( xintercept  = as.data.frame(sample_sums(ps_meta) )[,1] %>% mean(), 
+              linetype = 2 ) + 
+  ggtitle( paste0("Total number of reads", 
+                 " (",
+                 as.data.frame(sample_sums(ps_meta) )[,1] %>% mean() %>% round(., 2),
+                 " ± ",
+                 as.data.frame(sample_sums(ps_meta) )[,1] %>% sd() %>% round(., 2),
+                 ")")  ) +
+  labs(y = "Frequency of sequence count", 
+      x = "Sequence count in sample") +
+  #scale_x_continuous(labels = scales::label_math() ) +
+ 
+  scale_fill_manual(values = pal_cit) + 
+  scale_y_continuous(expand = c(0,0)) +
+  theme_bw() + 
+  theme(panel.grid = element_blank()) 
+
+
+```
+
+
+##  Rarefying
+Not ideal since the three sites are extracted differently and differ a lot in average sequence count. Just do it to check Judith's results. 
+```{r}
+
+ps_meta_rar <- rarefy_even_depth(ps_meta, sample.size = 2000,
+                                   rngseed = 123, replace = TRUE, 
+                                   trimOTUs = TRUE, verbose = TRUE)
+```
+
+
+# Composition
+
+## Barplot overall
+```{r}
+
+# add palette for the barplot
+myPal <- tax_palette( data = ps_meta, 
+                      rank = "Phylum", 
+                      n = 15, 
+                      pal = "greenArmytage",
+                      add = c(Other = "white") )
+
+
+# plot 
+ps_meta %>%
+  phyloseq::merge_samples(group = "Region") %>%
+  comp_barplot( tax_level = "Phylum", 
+                n_taxa = 15, 
+                other_name = "Other",
+                palette = myPal,
+                merge_other = FALSE, 
+                bar_width = 0.9,
+                bar_outline_colour = "gray45") +
+  scale_x_discrete(limits = c("Berlin", "Vienna", "Styria"), expand =  c(0,0)) +
+  coord_flip() + 
+  theme_fop -> plot_alpha
+
+# fix plot
+plot_alpha + 
+  theme(aspect.ratio = 0.359, 
+        legend.position = "bottom", 
+        plot.title = element_text(hjust = 0.5, size = 16) , 
+        legend.title = element_text(angle = 90, size = 22, hjust = 0.5), 
+        legend.text = element_text(size = 11),
+        axis.text.y = element_text(angle = 90, hjust = 0.5, size = 16),
+        axis.text.x = element_text( hjust = 0.8)) +
+  scale_y_continuous(expand = c(0,0),
+                     labels = function(x) x * 100) + 
+  labs(title = "Relative abundance (%)", y = NULL)
+  
+ 
+
+```
+
+## Differential abundance analysis on lower taxonomic levels
+```{r}
+# with microeco
+t1 <- trans_diff$new(dataset = meco_meta, method = "lefse", 
+                     group = "Region", alpha = 0.01)
+
+t1$res_diff # for the result
+t1$plot_diff_bar(threshold = 4)
+# show 20 taxa with the highest LDA (log10)
+t1$plot_diff_abund(use_number = 1:10, width = 0.8, 
+                   group_order = c("Berlin", "Vienna", "Styria"), 
+                   color_values = pal_cit) +theme_fop
+```
+
+
+```{r}
+meco_meta$cal_abund()
+meco_meta$taxa_abund
+```
+
+
+
+```{r}
+# select taxa to plot from the previous plot 
+# and take their abundances for my manual plotting
+meco_meta$cal_abund()
+meco_meta$taxa_abund
+
+rbind(
+# 1 Woesearchaeales order
+meco_meta$taxa_abund$Order %>%  
+  rownames_to_column("taxa") %>%
+  filter(taxa == "d__Archaea|p__Nanoarchaeota|c__Nanoarchaeia|o__Woesearchaeales") %>% 
+  mutate(taxa = case_when(taxa == "d__Archaea|p__Nanoarchaeota|c__Nanoarchaeia|o__Woesearchaeales" ~
+                                  "Woesearchaeales \n(Order)")  )  ,
+
+# 2 proteobacteria phylum
+meco_meta$taxa_abund$Phylum %>%  
+  rownames_to_column("taxa") %>%
+  filter(taxa == "d__Bacteria|p__Proteobacteria") %>%  
+  mutate(taxa = case_when(taxa == "d__Bacteria|p__Proteobacteria" ~
+                                  "Proteobacteria \n(Phylum)")  )  ,
+
+# 3 gamma class
+meco_meta$taxa_abund$Class %>%  
+  rownames_to_column("taxa") %>%
+  filter(taxa == "d__Bacteria|p__Proteobacteria|c__Gammaproteobacteria") %>% 
+   mutate(taxa = case_when(taxa == "d__Bacteria|p__Proteobacteria|c__Gammaproteobacteria" ~
+                                  "Gammaproteobacteria \n(Class)")  ),
+
+# 4 oxalobacteraceae 
+meco_meta$taxa_abund$Family %>%  
+  rownames_to_column("taxa") %>%
+  filter(taxa == "d__Bacteria|p__Proteobacteria|c__Gammaproteobacteria|o__Burkholderiales|f__Oxalobacteraceae") %>% 
+   mutate(taxa = case_when(taxa == "d__Bacteria|p__Proteobacteria|c__Gammaproteobacteria|o__Burkholderiales|f__Oxalobacteraceae" ~
+                                  "Oxalobacteraceae \n(Family)")  ) ,
+
+# 5 pseudomonas genus
+meco_meta$taxa_abund$Genus %>%  
+  rownames_to_column("taxa") %>%
+  filter(taxa == "d__Bacteria|p__Proteobacteria|c__Gammaproteobacteria|o__Pseudomonadales|f__Pseudomonadaceae|g__Pseudomonas") %>%
+   mutate(taxa = case_when(taxa == "d__Bacteria|p__Proteobacteria|c__Gammaproteobacteria|o__Pseudomonadales|f__Pseudomonadaceae|g__Pseudomonas" ~
+                                  "Pseudomonas \n(Genus)")  ) ,
+
+# 6 candidatus omnitrophus genus
+meco_meta$taxa_abund$Genus %>%  
+  rownames_to_column("taxa") %>%
+  filter(taxa == "d__Bacteria|p__Verrucomicrobiota|c__Omnitrophia|o__Omnitrophales|f__Omnitrophaceae|g__Candidatus Omnitrophus") %>%
+   mutate(taxa = case_when(taxa == "d__Bacteria|p__Verrucomicrobiota|c__Omnitrophia|o__Omnitrophales|f__Omnitrophaceae|g__Candidatus Omnitrophus" ~
+                                  "Candidatus \nOmnitrophus \n(Genus)")  ),
+
+# 7 actimicrobium genus
+meco_meta$taxa_abund$Genus %>%  
+  rownames_to_column("taxa") %>%
+  filter(taxa == "d__Bacteria|p__Proteobacteria|c__Gammaproteobacteria|o__Burkholderiales|f__Oxalobacteraceae|g__Actimicrobium") %>%
+   mutate(taxa = case_when(taxa == "d__Bacteria|p__Proteobacteria|c__Gammaproteobacteria|o__Burkholderiales|f__Oxalobacteraceae|g__Actimicrobium" ~
+                                  "Actimicrobium \n(Genus)")  ),
+
+# 8 nitrosphaeria class
+meco_meta$taxa_abund$Class %>%  
+  rownames_to_column("taxa") %>%
+  filter(taxa == "d__Archaea|p__Crenarchaeota|c__Nitrososphaeria") %>%
+   mutate(taxa = case_when(taxa == "d__Archaea|p__Crenarchaeota|c__Nitrososphaeria" ~
+                                  "Nitrososphaeria \n(Class)")  )
+
+) -> dt_tmp
+
+
+# plotting
+dt_tmp %>% 
+  pivot_longer(cols = -taxa, names_to = "wells", 
+               values_to = "abundance") %>% 
+  
+  left_join(  ., 
+  samdat_tbl(ps_meta) %>% select("Region", "samp_ID"), 
+  
+  by= c("wells" = "samp_ID")) %>% 
+  
+  ggbarplot(x = "taxa", 
+            y = "abundance", 
+            fill ="Region", 
+            position =  position_dodge(0.7),
+            palette = pal_cit, 
+            add = "mean_se", 
+            # facet.by = "Cue",
+            ylab = "Relative abundance (%)", 
+            xlab = NULL, 
+            orientation = "horiz", 
+            # manually order based on groups
+            order = c("Actimicrobium \n(Genus)",
+                      "Oxalobacteraceae \n(Family)",
+                      "Pseudomonas \n(Genus)",
+                      "Nitrososphaeria \n(Class)",
+                      "Candidatus \nOmnitrophus \n(Genus)",
+                      "Gammaproteobacteria \n(Class)",
+                      "Proteobacteria \n(Phylum)",
+                      "Woesearchaeales \n(Order)"  )) + 
+  
+
+
+  theme_minimal() + 
+  theme_fop +
+  theme(aspect.ratio = 1.8, 
+        legend.position = c(0.79, 0.145), 
+        #axis.text.x = element_text(size = 10, angle = 90),
+        #axis.text.y = element_text(angle = 90)
+        ) + 
+  # coord_flip() +
+  labs(x = NULL) +
+  scale_y_continuous( expand = c(0.01, 0), 
+                      labels = function(x) x * 100 ) 
+
+```
+
+
+## Redox related composition
+Plotting only the process-related taxa with their respective chemical compounds.
+```{r}
+# isolate the taxa 
+ps_meta %>% 
+  # get taxa table
+  tt_get() %>% 
+  as.data.frame() %>% 
+  # isolate classes which have either sulf, nitr, meth
+  filter(grepl('sulf|nitro|meth', Class,  ignore.case = TRUE )) %>% 
+  select("Class") %>% 
+  unique() %>% 
+  filter(!Class %in% c("Unclassified Desulfobacterota", 
+                       "Desulfobacterota Phylum",
+                       # too little prevalence of sulfobacillia
+                       "Sulfobacillia", 
+                       "Omnitrophia", "Nitrospinota Phylum") )  %>%  
+  
+  as.list( ) -> list_of_classes
+
+
+
+
+
+ps_meta %>%
+  ps_filter(!is.na(SO4) & !is.na(PO4) & !is.na(NO3)) %>% 
+  tax_agg("Class") %>%
+  tax_transform("clr", zero_replace = "halfmin") %>% 
+  
+  cor_heatmap(cor = "spearman", 
+              taxa = list_of_classes$Class,
+              vars = c("SO4","NO3", "PO4"),
+              
+              tax_anno = taxAnnotation( Prev. = anno_tax_prev(ylim = 0:1),
+                                        Log10. = anno_tax_box(trans = "log10", 
+                                                              zero_replace = "halfmin") ),
+              row_names_gp = gpar(fontsize = 12), 
+              column_names_gp = gpar(fontsize = 12),
+              column_names_rot = 0,
+              column_names_centered = TRUE,
+    
+              colors = heat_palette("Blue-Red 3", 
+                                    rev = TRUE, 
+                                    sym = TRUE), 
+              
+              numbers = heat_numbers(decimals = 1, 
+                                     fontsize = 10,
+                                     col = "gray20"), 
+              grid_lwd = 3 ,
+              width = grid::unit(35, "mm"), 
+              height = grid::unit(10, "cm")) -> plot_redox
+
+
+plot_redox
+```
+Check it briefly for the most apareant trends.
+```{r, warning=FALSE}
+
+
+
+ps_meta %>%
+ tax_transform("clr", rank = "Class",  zero_replace = "halfmin") %>%
+  ps_get() %>%
+  ps_otu2samdat(list_of_classes$Class) %>% 
+  samdat_tbl() %>% 
+  .[, which(colnames(.) %in% c(list_of_classes$Class , "NO3", "SO4",  "samp_ID")  )  ] %>% 
+
+  pivot_longer(cols = -c(samp_ID, NO3,  SO4), names_to = "taxa", values_to = "abundances" ) %>% 
+  pivot_longer(cols =  -c(samp_ID, taxa, abundances), names_to = "variables", values_to = "concs" ) %>% 
+  
+  ggplot( aes(x = abundances, y = concs)) +
+  geom_point(alpha = 0.5) +
+  facet_grid( variables ~ taxa, scales = "free") +
+  geom_smooth(method = "lm", se = FALSE)  +
+  scale_y_log10() +
+  theme_minimal()
+
+```
+
+
+
+## RDA
+Draw the constrained ordination, and test it.
+```{r}
+ps_meta %>%
+  # remove zeroes so i can log it
+   ps_filter(TCC > 0, int_ATP > 0) %>%  
+  # find log
+   ps_mutate(log_TCC =  log(TCC), 
+             log_ATP = log(int_ATP)) %>% 
+  
+  tax_transform("clr", rank ="Family") %>%  
+  
+  ord_calc(constraints =  c(# "DOC",
+                            "PO4", "SO4", "NO3" ,  "Cl", "Na", "K", "Ca",  "Mg",              
+                            "Temp", "Cond", "log_TCC", "log_ATP", 
+                            "O2", "pH", "int_ATP", "TCC", "GW_Table", 
+                            "Extraction_depth") ) %>%
+  ord_plot( colour = "Region", size = 2.5, alpha = 0.35,
+            auto_caption = NA,
+            constraint_vec_length = 1,
+            constraint_vec_style = vec_constraint(1.5, colour = "grey15"),
+            constraint_lab_style = constraint_lab_style(type = "text", 
+                                                        max_angle = 90, 
+                                                        size = 3, 
+                                                        aspect_ratio = 0.35, 
+                                                        colour = "black"   )  ) +
+  
+  stat_ellipse(aes(colour = Region), linewidth = 0.2) + 
+  scale_color_manual(values = pal_cit) +
+  coord_fixed(ratio = 0.35, clip = "off")
+
+
+
+
+  ps_meta %>% 
+  ps_filter(TCC > 0, int_ATP > 0) %>%   
+  ps_mutate(log_TCC =  log(TCC), 
+            log_ATP = log(int_ATP)) %>% 
+    
+  ps_filter(Region == "Vienna") %>% 
+  #ps_filter(Region == "Berlin") %>% 
+  #ps_filter(Region == "Styria") %>% 
+
+    
+  tax_transform("clr", rank ="Family") %>% 
+  dist_calc("euclidean") %>% 
+
+  dist_permanova( seed = 1, 
+                  variables = c(# "DOC",
+                            "PO4", "SO4", "NO3" ,  "Cl", "Na", "K", "Ca",  
+                            "Mg", "Temp", "Cond", "log_TCC", "log_ATP", 
+                            "O2", "pH", "int_ATP", "TCC", "GW_Table", 
+                            "Extraction_depth", 
+                            
+                            # Vienna and Berlin
+                            "Zn", "HCO3", "As", "Cd", "Pb", "NH4", "Hg", "Mn", 
+                            "Fe", "Al", "Cr", "Ni", "Cu",
+                            
+                            # Vienna only
+                             "Shannon_H", "Abundance", "Sealing_Percent", 
+                             "Kf_Permeability_Coefficient", "redox_category", 
+                             "surfacewater_influenced", "Distance_Surfacewater_m",
+                             "Distance_Surfacewater_Habitatcategory" ),
+                  n_processes = 1, n_perms = 999 ) %>% 
+  perm_get() -> perm_results
+  
+  perm_results
+  
+  
+                              
+
+```
+
+
+## PCA with envfit
+Alternative plotting.
+```{r}
+
+# find ordination on wells alone
+ps_meta %>% 
+  tax_transform("clr", rank ="Family") %>%  
+  ord_calc(method = "PCA") %>%  ord_plot() -> pca_obj
+
+# fit the environmental variables
+en <- envfit(pca_obj$data[, 1:2] , pca_obj$data[,4:19] , permutations = 999, na.rm = TRUE)
+
+# extract it
+en_coord_cont <- as.data.frame(scores(en, "vectors")) * ordiArrowMul(en) *2.5
+#en_coord_cat <- as.data.frame(scores(en, "factors")) * ordiArrowMul(en)
+
+
+# plot it
+ggplot(data = pca_obj$data[, 1:2], aes(x = PC1, y = PC2)) + 
+  theme_minimal() +
+  
+     geom_point(data = pca_obj$data, aes(fill = Region), 
+                size = 3, alpha = 0.9, shape = 21) + 
+  
+     scale_colour_manual(values = pal_cit)  + 
+     scale_fill_manual(values = pal_cit)  + 
+  
+     geom_segment(aes(x = 0, y = 0, xend = PC1, yend = PC2), 
+                  data = en_coord_cont, size =1, 
+                  alpha = 0.7, colour = "gray19", 
+                   arrow = arrow(length = unit(0.3, "cm"))) +
+  
+  
+     ggrepel::geom_label_repel(
+       position = ggpp::position_nudge_center(0.2, 0.1, 0, 0),
+       data = en_coord_cont, aes(x = PC1, y = PC2), 
+               fill = "white",
+               colour = "black", fontface = "bold", 
+               label = row.names(en_coord_cont)) +
+  theme_fop + 
+  theme(legend.position = c(0.09, 0.85), 
+        aspect.ratio = 0.75)  -> fig_env
+
+
+fig_env
+```
+
+
+
+Plot the envfit effect size for each region.
+```{r}
+ps_meta %>% ps_filter(TCC > 0, int_ATP > 0)  %>% 
+  ps_mutate(log_TCC =  log(TCC), 
+             log_ATP = log(int_ATP)) -> ps_no_zero
+
+
+## berlin
+ps_no_zero %>% 
+  ps_filter(Region == "Berlin") %>% 
+  tax_transform("clr", rank ="Family") %>%  
+  ord_calc(method = "PCA") %>%  ord_plot() -> pca_obj_city_berlin
+
+
+
+en2 <- envfit(pca_obj_city_berlin$data[, 1:2] , 
+              # for cities
+              pca_obj_city_berlin$data[,c(4:33, 48:49)] , 
+              # for styria
+              #pca_obj_city$data[,c(4:20, 36, 48:49)] , 
+              permutations = 999, na.rm = TRUE)
+
+
+en2$vectors -> berlin_effect_vec
+en2$factors -> berlin_effect_fac
+
+
+
+
+
+## vienna
+ps_no_zero %>% 
+  ps_filter(Region == "Vienna") %>% 
+  tax_transform("clr", rank ="Family") %>%  
+  ord_calc(method = "PCA") %>%  ord_plot() -> pca_obj_city_vienna
+
+en2 <- envfit(pca_obj_city_vienna$data[, 1:2] , 
+              # for cities
+              pca_obj_city_vienna$data[,c(4:33, 48:49)] , 
+              # for styria
+              #pca_obj_city$data[,c(4:20, 36, 48:49)] , 
+              permutations = 999, na.rm = TRUE)
+
+en2$vectors -> vienna_effect_vec
+en2$factors -> vienna_effect_fac
+
+
+
+
+## styria
+ps_no_zero %>% 
+  ps_filter(Region == "Styria") %>% 
+  tax_transform("clr", rank ="Family") %>%  
+  ord_calc(method = "PCA") %>%  ord_plot() -> pca_obj_city_styria
+
+en2 <- envfit(pca_obj_city_styria$data[, 1:2] , 
+              # for cities
+              # pca_obj_city$data[,c(4:33, 48:49)] , 
+              # for styria
+              pca_obj_city_styria$data[,c(4:20, 36, 48:49)] , 
+              permutations = 999, na.rm = TRUE)
+
+
+en2$vectors -> styria_effect_vec
+en2$factors -> styria_effect_fac
+
+
+
+
+
+rbind(
+
+cbind(berlin_effect_vec$r,  berlin_effect_vec$pvals) %>% 
+  as.data.frame() %>% mutate(Region = "Berlin") %>% 
+  rownames_to_column("env_vars"),
+
+
+cbind(vienna_effect_vec$r,  vienna_effect_vec$pvals) %>% 
+  as.data.frame() %>% mutate(Region = "Vienna") %>% 
+  rownames_to_column("env_vars"),
+  
+cbind(styria_effect_vec$r,  styria_effect_vec$pvals) %>% 
+  as.data.frame() %>% mutate(Region = "Styria")  %>% 
+  rownames_to_column("env_vars")
+  
+) %>% 
+
+  
+   
+  mutate(sig = case_when( V2 <= 0.05 & V2 > 0.01 ~ "*",  
+                          V2 <= 0.01 & V2 > 0.001 ~ "**",  
+                          V2 <= 0.001 ~ "***", 
+                          TRUE ~ "ns"  )) %>% 
+  #arrange(desc(V1)) %>%  
+  select(!"V2") %>% 
+  filter(sig != "ns") %>% 
+  filter( env_vars != "TCC") %>% 
+  mutate(env_vars = case_when(env_vars == "Extraction_depth" ~ "Ex. depth", 
+                              env_vars == "log_TCC" ~ "log(TCC)" ,
+                              env_vars == "log_ATP" ~ "log(ATP)" ,
+                              TRUE ~ env_vars) ) -> df_tmp 
+
+
+
+
+# needed manual functions
+scale_x_reordered <- function(..., sep = "___") {
+  reg <- paste0(sep, ".+$")
+  ggplot2::scale_x_discrete(labels = function(x) gsub(reg, "", x), ...)
+}
+
+reorder_within <- function(x, by, within, fun = mean, sep = "___", ...) {
+  new_x <- paste(x, within, sep = sep)
+  stats::reorder(new_x, by, FUN = fun)
+}
+
+
+
+# plot it
+df_tmp %>% 
+
+  ggplot(aes(y = V1, x = reorder_within(env_vars, -V1, Region )  )) + 
+  geom_col( aes(fill = Region)) + 
+  
+  facet_grid(~Region, scales = "free", space = "free") +
+  
+  theme_minimal() + 
+  theme_fop + 
+  theme(axis.text.x = element_text(angle = 90, hjust=1, vjust = 0.5 ), 
+        axis.text.y = element_text(angle = 90, hjust=0.5, vjust = 0 ), 
+        #aspect.ratio = 0.7, 
+        axis.title = element_text(size = 14, face = "bold"), 
+        strip.text = element_text(size = 10), 
+        legend.position = c(0.65, 0.79)) +
+  labs(x = NULL, y = "r2 (effect size)") +
+  coord_cartesian(clip = 'off') +
+  scale_y_continuous(expand = c(0, NA), limits = c(0, 0.5)) +
+  geom_text(aes(label = sig)) +
+  scale_fill_manual(values = pal_cit) +
+  scale_x_reordered()
+
+
+
+``` 
+
+
+##  Ecodist (MRM)
+To find explainable portion of variance.
+```{r}
+## BERLIN
+ecodist::MRM(formula = ps_no_zero %>% 
+  ps_filter(Region == "Berlin") %>% 
+  #ps_filter(Region == "Vienna") %>% 
+  #ps_filter(Region == "Styria") %>% 
+  tax_transform("clr", rank ="Family") %>% 
+    otu_get() %>%  dist() ~ dist(NO3) + dist(PO4) + 
+    dist(Extraction_depth) + dist(Cu) + dist(log_TCC) + 
+    dist(Cd) + dist(K) + dist(O2) + dist(NO3) + dist(Cond) +
+    dist(As) + dist(Mn) + dist(pH) + dist(Ca) + dist(SO4) + 
+    dist(HCO3) + dist(Ni) + dist(Mg) + dist(Fe) + dist(Temp) +
+    dist(NH4) + dist(Zn) + dist(Na) + dist(GW_Table) + dist(Cl),
+  
+  
+  data  = pca_obj_city_berlin$data[,c(4:33, 48:49)], 
+             nperm = 100, 
+             method = "linear") # 0.3060434 R2
+
+
+
+## VIENNA
+ecodist::MRM(formula = ps_no_zero %>% 
+  ps_filter(Region == "Vienna") %>% 
+
+  tax_transform("clr", rank ="Family") %>% 
+    otu_get() %>%  dist() ~ dist(Al) + dist(pH),
+             data = pca_obj_city_vienna$data[,c(4:33, 48:49)],
+             nperm = 100, 
+             method = "linear") # 0.002731865 R2
+
+
+
+## STYRIA
+ecodist::MRM( ps_no_zero %>%
+                ps_filter(Region == "Styria") %>% 
+                tax_transform("clr", rank ="Family") %>% 
+                otu_get() %>%  
+                dist() ~      dist(O2)  + dist(Cl)  + dist(K) +
+                dist(log_ATP) + dist(log_TCC),
+              
+              
+             data = pca_obj_city_styria$data[,c(4:33, 48:49)], 
+             nperm = 100, 
+             method = "linear")  #0.1698576 R2
+
+
+# prepare for plotting
+
+results_df <- data.frame(
+  Model = c("Berlin", "Berlin", 
+            "Vienna", "Vienna", 
+            "Styria", "Styria"),
+  R_squared = c( 0.3060434, 1-0.3060434, 
+                 0.002731865, 1-0.002731865, 
+                 0.1698576, 1-0.1698576), 
+  explained = c("Explained", "Unexplained", 
+                "Explained", "Unexplained", 
+                "Explained", "Unexplained") ) %>% 
+  mutate(R_squared = round(R_squared *100, 2)  )
+
+
+
+results_df_lab <- 
+  results_df  %>% 
+  # arrange in the order of the legend
+  arrange(desc(R_squared )) %>% 
+  # calculate where to place the text labels
+  mutate(text_y = R_squared) 
+
+
+
+# plot piechart
+ggplot(results_df, 
+       aes(x="", 
+           y=R_squared, 
+           fill = fct_inorder(explained) )   )+
+  geom_bar(stat="identity",
+           width=1, color="black") +
+  coord_polar("y", start=0) +
+
+  theme_void() + 
+  theme(legend.position="none", 
+        strip.text = element_text(size = 15), 
+         plot.background = element_rect(fill = "#f1f1f1"),
+        legend.background = element_rect(fill = "#f1f1f1", color = NA), 
+        legend.text = element_text(color = "gray29", size = 10),
+        legend.title = element_text(color = "gray29", size = 10)) +
+  
+  facet_wrap(~Model) +
+  
+  ggrepel::geom_label_repel( aes(label = paste0(R_squared,"%"), 
+                                 y = text_y, fill = explained),
+            data = results_df_lab,
+            position = position_stack(vjust = 0),
+             size=6, segment.colour="black") +
+  scale_fill_manual(values = c("tomato3", "gray"))+
+  scale_color_manual(values = c("tomato3", "gray")) + 
+  labs(fill = "Explained \nvariance")
+  
+```
+
+
+
+# Beta diversity
+
+## Rarified plot
+Rarified to confirm Judith's results.
+```{r}
+ps_meta_rar %>% 
+  tax_transform("compositional", rank ="Family") %>% 
+  dist_calc("bray") %>% 
+  ord_calc("NMDS") -> ord_genus_lvl
+
+ord_genus_lvl %>% 
+  ord_plot(fill = "Region", size = 3, alpha = 0.9, color = "black", shape = 21) + 
+  stat_ellipse(aes(color = Region, fill = Region), 
+               alpha = 0.2, geom = "polygon") + 
+  scale_color_manual(values = pal_cit) + 
+  scale_fill_manual(values = pal_cit) + 
+  theme_fop
+```
+
+## Non-rarified plot
+```{r}
+ps_meta %>% 
+  tax_transform("identity", rank ="Family") %>% 
+  dist_calc("aitchison") %>% 
+  ord_calc("PCoA") -> ord_genus_lvl_ait
+
+ord_genus_lvl_ait %>% 
+   ord_plot(fill = "Region", size = 3, alpha = 0.8, 
+            color = "black", shape = 21,
+            auto_caption = NA) + 
+  stat_ellipse(aes(color = Region, fill = Region), 
+               alpha = 0.2, geom = "polygon") + 
+  scale_color_manual(values = pal_cit) + 
+  scale_fill_manual(values = pal_cit) +
+  theme_fop +
+  theme(legend.position = c(0.099,0.75), 
+        aspect.ratio = 0.8) +
+  
+  # add density dsitribution
+  ggside::geom_xsidedensity(aes(fill = Region), 
+                            alpha = 0.5, show.legend = FALSE) +
+  ggside::geom_ysidedensity(aes(fill = Region), 
+                            alpha = 0.5, show.legend = FALSE) +
+  ggside::theme_ggside_void() -> fig_beta
+
+fig_beta
+```
+
+## Dispersion testing
+```{r}
+# extract
+ord_genus_lvl_ait %>% 
+dist_bdisp(variables = "Region") %>%
+bdisp_get() -> bdisp_region
+
+# see details 
+bdisp_region$Region$anova
+bdisp_region$Region$tukeyHSD # styria berlin same, others sign
+
+# plot
+cbind(bdisp_region$Region$model$distances %>% 
+        as.data.frame() %>% rename("distances" = "."), 
+      bdisp_region$Region$model$group %>% 
+        as.data.frame() %>% rename("Region" = ".")) %>% 
+  ggboxplot( x = "Region", 
+             y = "distances", 
+             fill = "Region",
+             palette = pal_cit,
+             ylab = "Distances to centroid") +
+  stat_compare_means(comparisons =  list( c("Vienna", "Berlin"),
+                                          c("Styria", "Vienna"), 
+                                          c("Berlin", "Styria") ), 
+                     label = "p.signif", 
+                     label.y = c(50, 47, 45)) +
+
+  theme_fop +
+  theme(panel.border =  element_blank(), 
+        #aspect.ratio = 1.6, 
+        #aspect.ratio = 0.6,
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        legend.position = "none") + 
+  coord_flip() -> fig_disp
+
+
+```
+
+
+# Alpha diversity
+
+## By region
+```{r}
+
+
+t1 <- trans_alpha$new(dataset = meco_meta, 
+                      group = "Region")
+t1$data_alpha %>% 
+  as.data.frame() %>%  
+  filter(Measure == "Shannon") %>% 
+  mutate(Value = exp(Value)) %>% 
+  ggbarplot(x = "Region", 
+            y = "Value", 
+            fill ="Region", 
+            palette = pal_cit, 
+            add = "mean_se", 
+            # facet.by = "Cue",
+            title = "Alpha diversity by \nsampling site",
+            xlab = "Sampling site", 
+            ylab = "Shannon diversity index (exponential)", 
+            order = c("Berlin", "Vienna", "Styria") ) + 
+  
+  coord_cartesian(clip = 'off') +
+  stat_compare_means(comparisons =  list( c("Vienna", "Berlin"), c("Styria", "Vienna") ), 
+                     label = "p.signif", 
+                     label.y = c(550, 325)) +
+
+  theme_fop +
+  theme(panel.border =  element_blank(), 
+        aspect.ratio = 1.6, 
+        legend.position = "none", 
+        axis.title = element_text(size = 14),
+        axis.text.y = element_text(angle = 90)) -> fig_alpha
+
+fig_alpha
+
+
+```
+
+
+
+## By aquifer
+```{r}
+# just to check since env vars were different in vienna
+# danube island closer to rural
+
+t1$data_alpha %>% 
+  as.data.frame() %>%  
+  filter(Measure == "Shannon") %>% 
+  mutate(Value = exp(Value)) %>% 
+  
+  filter(Region != "Styria") %>% 
+  
+  ggdotchart(x = "geo_unit", 
+            y = "Value", 
+            fill = "geo_unit",
+            color = "geo_unit",
+            #palette = pal_cit, 
+            add = "segment", 
+            
+            legend.title = "Aquifer", 
+            title = "Alphy diversity by geology",
+            xlab = "Geological unit", 
+            ylab = "Shannon diversity index (exponential)")  + 
+  
+  theme_fop + 
+  scale_color_manual(values = randomcoloR::distinctColorPalette(17)) +
+  
+  theme(legend.position = "right", 
+        axis.text.x = element_blank() ) -> alpha_div
+  
+facet(alpha_div,  facet.by = "Region", scales = "free_x")
+
+
+
+```
+
+
+## VS isotope
+```{r}
+# get back to it after categorising styria for isotopes
+# and getting the isotope data for berlin
+```
+
+
+## VS envs
+Plotting all regions together.
+```{r}
+t1$data_alpha %>% 
+  as.data.frame() %>% 
+  filter(Measure == "Shannon") %>% 
+  #mutate(Value = exp(Value)) %>% 
+  
+  mutate(log_tcc = log(TCC)) %>% 
+                      rename("Ex_depth" = "Extraction_depth") %>% 
+                      select("log_tcc",  "Sample", "Region", "Value",
+                             "PO4", "SO4", "Cl", "K", 
+                             "GW_Table", "Ex_depth",
+                             "Cond", "pH", "O2") %>% 
+  
+   
+  # select("Sample", "Region", where(is.numeric)) %>% 
+   #.[,  1:36] %>% 
+  
+   pivot_longer(cols = -c(Sample, Region, Value ) ) %>% 
+   
+   ggplot(aes(color = Region, y = value, x = Value)) + 
+   geom_point(alpha = 0.4) + 
+   ggplot2::facet_wrap(~name, scales = "free_y", nrow  =2) + 
+   scale_color_manual(values = pal_cit) + 
+   theme_minimal() + 
+   theme(legend.position = "none") +
+   geom_smooth(method = "lm", se  = F)
+```
+                                                                                                                                  
+                                                                                                                  Targetted plotting of the variables chosen by in the lower chunk by microeco.              
+```{r}
+
+# plot 1
+t1$data_alpha %>% 
+  as.data.frame() %>% 
+  filter(Measure == "Shannon") %>% 
+  #mutate(Value = exp(Value)) %>% 
+  filter(Region == "Berlin") %>% 
+  filter(Value > 0) %>% 
+
+   ggplot(aes( y = Value, x = TCC, color = Region)) + 
+   geom_point(alpha = 0.4) + 
+   scale_color_manual(values = pal_cit) +
+   theme_minimal() + 
+  theme(legend.position = "none", 
+        aspect.ratio = 1) +
+  scale_x_log10() +
+   geom_smooth(method = "lm", se  = F)  +
+
+  
+# plot 2  
+t1$data_alpha %>% 
+  as.data.frame() %>% 
+  filter(Measure == "Shannon") %>% 
+   #mutate(Value = exp(Value)) %>% 
+  filter(Cl <500) %>% 
+  filter(Cond < 3000) %>% 
+  
+  filter(Region == "Berlin") %>% 
+  mutate(log_tcc = log(TCC)) %>% 
+                      rename("Ex_depth" = "Extraction_depth") %>% 
+                      select( "Sample", "Region", "Value",
+                              "SO4", "Cl", "K", 
+                             "GW_Table", "Ex_depth",
+                             "Cond", "pH", "O2") %>% 
+   
+  # select("Sample", "Region", where(is.numeric)) %>% 
+   #.[,  1:36] %>% 
+   pivot_longer(cols = -c(Sample, Region, Value ) ) %>% 
+   
+   ggplot(aes(color = Region, x = value, y = Value)) + 
+   geom_point(alpha = 0.4) + 
+   ggplot2::facet_wrap(~name, scales = "free_x", nrow  =2) + 
+   scale_color_manual(values = pal_cit) + 
+   theme_minimal() + 
+   theme(legend.position = "none") +
+   geom_smooth(method = "lm", se  = F) +
+
+
+# plot 3
+t1$data_alpha %>% 
+  as.data.frame() %>% 
+  filter(Measure == "Chao1") %>% 
+  #mutate(Value = exp(Value)) %>% 
+  filter(Region == "Styria") %>% 
+  filter(Value > 0) %>% 
+
+   ggplot(aes( y = Value, x = TCC, color = Region)) + 
+   geom_point(alpha = 0.9) + 
+   scale_color_manual(values = pal_cit) +
+   theme_minimal() + 
+  theme(legend.position = "none", 
+        aspect.ratio = 1) +
+  scale_x_log10() +
+   geom_smooth(method = "lm", se  = F) +
+
+
+# plot 4
+t1$data_alpha %>% 
+  as.data.frame() %>% 
+  filter(Measure == "Chao1") %>% 
+   #mutate(Value = exp(Value)) %>% 
+  filter(Cl <500) %>% 
+  filter(Cond < 3000) %>% 
+  
+  filter(Region == "Styria") %>% 
+  mutate(log_tcc = log(TCC)) %>% 
+                      rename("Ex_depth" = "Extraction_depth") %>% 
+                      select( "Sample", "Region", "Value",
+                               "K", 
+                             "GW_Table", "Ex_depth",
+                             "Cond", "pH", "O2") %>% 
+   
+  # select("Sample", "Region", where(is.numeric)) %>% 
+   #.[,  1:36] %>% 
+   pivot_longer(cols = -c(Sample, Region, Value ) ) %>% 
+   
+   ggplot(aes(color = Region, x = value, y = Value)) + 
+   geom_point(alpha = 1) + 
+   ggplot2::facet_wrap(~name, scales = "free_x", nrow  =2) + 
+   scale_color_manual(values = pal_cit) + 
+   theme_minimal() + 
+   theme(legend.position = "none") +
+   geom_smooth(method = "lm", se  = F)
+
+
+# the richness here falls with oxygen, but oxygen itself falls downstream, and so does oxygen, maybe there is no causality
+```
+                                                                                                                                  
+                                                                                                                                        
+
+```{r}
+# create object
+t1 <- trans_env$new(dataset = meco_meta,
+                    add_data = meco_meta$sample_table %>%  
+                      mutate(log_tcc = log(TCC)) %>% 
+                      rename("Ex_depth" = "Extraction_depth") %>% 
+                      select("log_tcc", 
+                             "PO4", "SO4", "Cl", "K", 
+                             "GW_Table", "Ex_depth",
+                             "Cond", "pH", "O2") )
+
+# calculate correlation
+t1$cal_cor(add_abund_table = meco_meta$alpha_diversity[, c("Chao1", "Shannon")], 
+           cor_method = "spearman", 
+           by_group = "Region", 
+           p_adjust_method = "fdr", 
+           p_adjust_typ = "Env" )
+
+
+# plotting
+t1$plot_cor(cluster_ggplot = "both"  ) + 
+  theme_minimal() + 
+  theme_fop + 
+  theme(axis.text.x = element_text(angle = 90, hjust=1, vjust = 0.5 ), 
+        #axis.text.y = element_text(angle = 270, hjust=36, vjust = 1 ),
+        strip.text = element_text(size = 15), 
+        legend.position = "left" ) +
+  labs(x = NULL) 
+
+
+
+
+# the same for heavy metals
+t1 <- trans_env$new(dataset = meco_meta,
+                    add_data = meco_meta$sample_table %>% 
+                      filter(Region != "Styria") %>% 
+                      #19:32 heavy metals
+                      .[, 19:31]   )
+
+
+t1$cal_cor(add_abund_table = meco_meta$alpha_diversity[, c("Chao1", "Shannon")], 
+           cor_method = "spearman", by_group = "Region", p_adjust_method = "fdr", 
+           p_adjust_typ = "Env"         )
+
+
+t1$plot_cor(cluster_ggplot = "both"  ) + 
+  theme_minimal() + 
+  theme_fop + 
+  theme(axis.text.x = element_text(angle = 90, hjust=1, vjust = 0.5 ), 
+        #axis.text.y = element_text(angle = 270, hjust=36, vjust = 1 ),
+        strip.text = element_text(size = 15), 
+        legend.position = "left" ) +
+  labs(x = NULL)
+
+
+   
+```
+
+
+
+
+# Environment
+
+
+## Most variables
+
+```{r}
+# make the pca
+prcomp(samdat_tbl(ps_meta, sample_names_col = "sample_ID") %>%  
+         column_to_rownames("sample_ID")  %>%  
+         .[,c(2:4, 11: 17) ] %>% 
+         mutate_if(is.character, as.numeric ) %>% 
+         scale()  %>%  na.omit() , 
+         center = T) -> pca_envs
+
+
+
+
+data_for_pca <- samdat_tbl(ps_meta, sample_names_col = "sample_ID") %>%
+  column_to_rownames("sample_ID")  %>%
+  # add the envs
+  .[,c(1:4, 11: 18,  32) ] %>%  
+  
+  # add the axes
+  left_join(pca_envs$x[,1:2] %>% 
+            as.data.frame() %>% 
+              rownames_to_column("samp_ID"), ., 
+            
+            by = "samp_ID") 
+                                    
+
+
+# plot it 
+
+#  i need a darker gray for this plot styria
+pal_cit2 <- c("Styria" = "gray60", 
+             "Vienna" = "darkorchid3",
+             "Berlin" = "darkgoldenrod3" )
+
+
+# final plotting
+ggplot(data = data_for_pca %>%  filter( Region != "Styria"), aes(x = PC1, y = PC2)) + 
+  theme_minimal() +
+  
+   stat_ellipse(aes(fill = Region),alpha = 0.4, geom = "polygon" ) +
+  
+  
+     geom_point( aes(color = Region, shape = geo_unit), 
+                size = 3, alpha = 0.9) + 
+  
+     scale_colour_manual(values = pal_cit2)  + 
+     scale_fill_manual(values = pal_cit2)  + 
+  
+     stat_ellipse(data = data_for_pca %>% filter(Region == "Styria"), 
+                aes(fill = Region),alpha = 1, color = "gray60", linewidth = 1.2 ) +
+  
+     geom_segment(aes(x = 0, y = 0, xend = PC1*6, yend = PC2*6), 
+                  data = pca_envs$rotation %>% as.data.frame(), size =1, 
+                  alpha = 1, colour = "gray19", 
+                   arrow = arrow(length = unit(0.3, "cm"))) +
+  
+  
+     ggrepel::geom_label_repel(max.overlaps = 30,
+       position = ggpp::position_nudge_center(0.2, 0.1, 0, 0),
+       data = pca_envs$rotation %>% as.data.frame(), aes(x = PC1*6, y = PC2*6), 
+               fill = "white",
+               colour = "black", fontface = "bold", 
+               label = row.names(pca_envs$rotation %>% as.data.frame())) +
+  
+  
+  scale_shape_manual(values= #1:nlevels(data_for_pca$geo_unit)
+                       
+                       c(1, 2, 15, 4,  5,  6,  7,  8,  16, 
+                         10, 11, 12, 13, 14, 9, 3, 17)) + 
+ 
+  
+  theme_fop + 
+  theme(aspect.ratio = 0.75, legend.position = "bottom") +
+  # look at this with summary(pca_envs)
+  labs(x  = "PC1 [22.4%]", y = "PC2 [16.81%]")
+
+
+```
+
+```{r}
+# test internal atp between the cities
+wilcox.test(int_ATP ~ Region,  
+            
+            data = meta_env %>% 
+              filter(Region !="Styria" ) %>% 
+              select("Region", "int_ATP")  %>% 
+              na.omit() %>% 
+              mutate(int_ATP = as.numeric(int_ATP)) %>% 
+              mutate(int_ATP = log(int_ATP))  )
+
+
+# test tcc for all regions
+aov(log(as.numeric(TCC) ) ~ Region, data = meta_env) %>%  TukeyHSD()
+```
+
+
+
+
+## Heavy metals (cities only)
+```{r}
+prcomp(samdat_tbl(ps_meta, sample_names_col = "sample_ID") %>%  
+         column_to_rownames("sample_ID")  %>%  
+         # remove rural region
+         filter(Region != "Styria") %>% 
+         # filter only heavy metals
+         .[,c("HCO3", "Zn", "As", "Cd", "Pb", "NH4", "Hg", "Mn", "Fe",
+              "Al", "Cr", "Ni"  ) ] %>% 
+         mutate_if(is.character, as.numeric ) %>% 
+         scale()  %>%  na.omit() , 
+         center = T) -> pca_envs_metals
+
+
+
+data_for_pca_metals <- samdat_tbl(ps_meta, sample_names_col = "sample_ID") %>%
+  column_to_rownames("sample_ID")  %>%
+  filter(Region != "Styria") %>% 
+         .[,c("HCO3", "Zn", "As", "Cd", "Pb", "NH4", "Hg", "Mn", "Fe",
+              "Al", "Cr", "Ni" ,"samp_ID","Region" ) ] %>% 
+             
+  # add the axes
+  left_join(pca_envs_metals$x[,1:2] %>% 
+            as.data.frame() %>% 
+              rownames_to_column("samp_ID"), ., 
+            
+            by = "samp_ID") 
+                                    
+
+# plot it 
+ggplot(data = data_for_pca_metals , aes(x = PC1, y = PC2)) + 
+  theme_minimal() +
+  
+   stat_ellipse(aes(fill = Region),alpha = 0.4, geom = "polygon" ) +
+  
+  
+     geom_point( aes(fill = Region),  shape = 21,  
+                size = 3, alpha = 0.6, color = "black") + 
+  
+     scale_colour_manual(values = pal_cit2)  + 
+     scale_fill_manual(values = pal_cit2)  + 
+  
+  
+     geom_segment(aes(x = 0, y = 0, xend = PC1*10, yend = PC2*10), 
+                  data = pca_envs_metals$rotation %>% as.data.frame(), size =1, 
+                  alpha = 1, colour = "gray19", 
+                   arrow = arrow(length = unit(0.3, "cm"))) +
+  
+  
+     ggrepel::geom_label_repel(max.overlaps = 40,
+       position = ggpp::position_nudge_center(0.2, 0.1, 0, 0),
+       data = pca_envs_metals$rotation %>% as.data.frame(), aes(x = PC1*10, y = PC2*10), 
+               fill = "white",
+               colour = "black", fontface = "bold", 
+               label = row.names(pca_envs_metals$rotation %>% as.data.frame())) +
+  
+ 
+  
+  theme_fop + 
+  theme(aspect.ratio = 1, legend.position = c(0.87, 0.87)) +
+  labs(x  = "PC1 [18.3%]", y = "PC2 [13.94%]") +
+  coord_cartesian(xlim = c(-5.2, 7))
+
+
+
+```
+
+
+## Boxplots
+Check breifly with boxplots
+```{r}
+
+# all variables
+ps_meta@sam_data[,c(1:4, 11: 17, 19) ] %>% as_tibble() %>%  as.data.frame() -> df_clean
+  
+df_clean %>% 
+  pivot_longer( cols = -c(samp_ID, Region) ) %>% 
+  ggplot(aes(x= Region, y = value, fill = Region)) + 
+  geom_boxplot(outlier.colour = NA) + 
+  geom_jitter(shape = 21) + 
+  facet_wrap(~name, scales = "free_y") + 
+  scale_y_log10() + 
+  theme_minimal() +
+  scale_fill_manual(values = pal_cit) + 
+  theme(legend.position = "none")
+
+
+
+
+# heavy metals
+ data_for_pca_metals %>% 
+  select(!c("PC1", "PC2")) %>% 
+
+pivot_longer( cols = -c(samp_ID, Region) ) %>% 
+  ggplot(aes(x= Region, 
+              y = value, 
+             fill = Region)) + 
+  #coord_flip() + 
+  
+  geom_boxplot(outlier.color = NA) + 
+  geom_jitter(shape = 21) + 
+  #geom_histogram(bins = 30 ) +
+  facet_wrap(~name, scales = "free") + 
+  scale_y_log10() + 
+  theme_minimal() +
+  scale_fill_manual(values = pal_cit) + 
+  theme(legend.position = "none") 
+```
+
+Check summary to confirm Judith's data.
+```{r}
+summary(df_clean$NO3 ~ df_clean$Region)
+summary(df_clean$SO4 ~ df_clean$Region)
+```
+
+## Isotope ratio
+For Vienna and Styria only
+```{r}
+ 
+ ggplot() + 
+  geom_point(data = metadata_styria, aes(x= dO18, y  = dH2),
+             alpha = 0.6, size = 3, color = "gray")  +
+  geom_point(data = HBTC, aes(x= d18O_2, y  = dH2_2, 
+                              color = as.factor(surfacewater_influenced) ),
+             alpha = 0.8, size = 3, shape = 21)  +
+  theme_minimal() + 
+   theme_fop +
+ 
+  
+  # styria
+  geom_abline(intercept = 6.8,
+              slope = 7.8, 
+               linetype = "dashed", 
+               color = "black") + 
+  
+  # austria meteoric line
+  geom_abline(intercept = 3.2,
+              slope = 7.5, 
+               linetype = "dashed", 
+               color = "black")  +
+  
+  geom_abline(intercept = -28,
+              slope = 4.4, 
+               linetype = "dashed", 
+               color = "gray")  +
+  
+  labs(color = "Surface \nwater \ninfluenced")
+   
+   
+```
+
+
+
+# TCC/ATP
+```{r}
+ggplot(df_clean, aes(x = TCC, y = int_ATP, fill = Region)) +
+  
+  guides(color = 'none') + 
+   scale_x_log10(limits = c(10^5.5, 10^9.5), 
+                 breaks = 10^seq(5.5, 9.5, 1),
+                labels = c(expression(10^{5.5}), expression(10^{6.5}), 
+                           expression(10^{7.5}), expression(10^{8.5}), 
+                           expression(10^{9.5}) )) +
+  
+  scale_y_log10(
+  breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)) 
+    
+   # breaks = 10^seq(-1, 4, 1),
+               #labels = c(0.1, 1, 10, 100, 1000)
+  ) +
+  
+                           
+                           
+  theme_minimal() + 
+  labs(x= expression("Cells L"^{-1}), 
+       y="ATP [pM]") + 
+  theme(aspect.ratio = 1, 
+        legend.position = c(0.66, 0.12) ) + 
+  scale_fill_manual(values = pal_cit) + 
+  scale_color_manual(values = pal_cit) +
+  
+  
+  stat_ellipse(data = df_clean %>%  filter(Region == "Styria"), 
+               geom = "polygon",   fill = "#999999", alpha = 0.5 ) +
+  
+  geom_point(size = 2, alpha = 0.9, shape = 21, stroke = 0.1) + 
+
+  stat_ellipse(data = df_clean %>%  filter(Region != "Styria"), 
+               alpha = 0.8 , linewidth = 1,  aes (color = Region) ) +
+
+  labs(fill = NULL) +
+  
+  theme_fop + ggside::geom_xsidedensity(aes(color = Region), 
+                                        fill = NA,  
+                            alpha = 0.9, show.legend = FALSE) + 
+  ggside::geom_ysidedensity(aes(color = Region), fill = NA, 
+                            alpha = 0.9, show.legend = FALSE) +
+  
+  
+  theme(ggside.panel.scale.x = .2,
+        ggside.panel.scale.y = .25,
+        legend.background = element_rect(colour = NA)) +
+  
+  ggside::scale_ysidex_continuous(guide = guide_axis(angle = 90), minor_breaks = NULL) -> fig_atp
+```
+
+
+
+
+# Functional
+```{r}
+# create object of trans_func
+t2 <- trans_func$new(meco_meta)
+t2$for_what <- "prok"
+  
+t2$cal_spe_func(prok_database = "FAPROTAX")
+t2$cal_spe_func_perc(abundance_weighted = FALSE)
+
+t2$trans_spe_func_perc()
+t2$plot_spe_func_perc()
+
+
+
+t2$res_spe_func_perc %>%  as.data.frame() %>% 
+  rownames_to_column("samp_ID") %>% 
+  pivot_longer(cols = -samp_ID, values_to = "abund_perc") %>% 
+  left_join(., df_clean  %>% 
+              .[, c("samp_ID", "Region" )], 
+            by = "samp_ID") %>% 
+  
+  group_by(Region, name) %>% 
+  summarise(abund_perc = mean(abund_perc)) %>% 
+  ungroup() %>% 
+  
+  group_by(Region) %>% 
+  mutate(abund_perc = abund_perc / sum(abund_perc) ) %>% 
+  ungroup() %>%
+
+  mutate(name = case_when(abund_perc < 0.01 ~ "other functions", 
+                          TRUE ~ name)) %>% 
+  filter(!is.na(Region) ) %>% 
+  ggplot(aes(x=Region, y = abund_perc, fill = name)) + 
+  geom_col(position="dodge", stat="identity") + 
+  scale_fill_manual(values =  randomcoloR::distinctColorPalette(35)) + 
+  theme_fop + 
+  theme(legend.text = element_text(size = 7), 
+        legend.key.size  = unit(0.35, "cm" )) +
+  guides(fill = guide_legend(ncol = 1)) +
+  labs(fill = NULL) +
+  coord_flip()
+```
+
+
+
